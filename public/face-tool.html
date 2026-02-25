@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PhotoMatch - Face Descriptor Generator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #fff; min-height: 100vh; }
+    .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+    h1 { text-align: center; color: #6C63FF; margin-bottom: 10px; font-size: 24px; }
+    .subtitle { text-align: center; color: #888; margin-bottom: 30px; font-size: 14px; }
+    .upload-area {
+      border: 2px dashed #6C63FF; border-radius: 16px; padding: 40px; text-align: center;
+      cursor: pointer; transition: all 0.3s; background: #16213e; margin-bottom: 20px;
+    }
+    .upload-area:hover { border-color: #FF6B6B; background: #1a1a3e; }
+    .upload-area img { max-width: 300px; max-height: 300px; border-radius: 12px; margin-bottom: 10px; }
+    .btn {
+      background: linear-gradient(135deg, #6C63FF, #FF6B6B); color: #fff; border: none;
+      padding: 12px 30px; border-radius: 8px; font-size: 16px; cursor: pointer;
+      transition: transform 0.2s; display: inline-block; margin: 5px;
+    }
+    .btn:hover { transform: scale(1.05); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .btn-secondary { background: #333; }
+    .status { text-align: center; padding: 15px; margin: 15px 0; border-radius: 8px; font-size: 14px; }
+    .status.loading { background: #1e3a5f; color: #64b5f6; }
+    .status.success { background: #1b5e20; color: #81c784; }
+    .status.error { background: #5e1b1b; color: #e57373; }
+    .result-box {
+      background: #0f0f23; border: 1px solid #333; border-radius: 12px; padding: 20px;
+      margin-top: 20px; display: none;
+    }
+    .result-box h3 { color: #6C63FF; margin-bottom: 10px; }
+    .descriptor-text {
+      background: #1a1a2e; border: 1px solid #444; border-radius: 8px; padding: 15px;
+      font-family: 'Courier New', monospace; font-size: 11px; word-break: break-all;
+      max-height: 200px; overflow-y: auto; line-height: 1.6; color: #aaa;
+    }
+    .actions { text-align: center; margin-top: 15px; }
+    .info { background: #16213e; border-radius: 8px; padding: 15px; margin-top: 15px; font-size: 13px; color: #888; }
+    .canvas-container { text-align: center; margin: 15px 0; }
+    canvas { border-radius: 12px; max-width: 100%; }
+    #fileInput { display: none; }
+    .camera-section { text-align: center; margin-bottom: 20px; }
+    video { border-radius: 12px; max-width: 100%; display: none; }
+    .face-count { font-size: 18px; color: #81c784; text-align: center; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>PhotoMatch Face Descriptor Tool</h1>
+    <p class="subtitle">Upload a photo or use camera to generate 128-dim face descriptor</p>
+
+    <div class="camera-section">
+      <button class="btn btn-secondary" id="cameraBtn" onclick="toggleCamera()">Use Camera</button>
+      <br><br>
+      <video id="video" width="400" height="300" autoplay></video>
+      <br>
+      <button class="btn" id="captureBtn" style="display:none" onclick="captureFromCamera()">Capture Photo</button>
+    </div>
+
+    <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()">
+      <p style="font-size: 18px; margin-bottom: 10px;">Click to upload a photo</p>
+      <p style="color: #888; font-size: 13px;">JPG, PNG supported</p>
+    </div>
+    <input type="file" id="fileInput" accept="image/*" onchange="handleFile(this.files[0])">
+
+    <div id="status"></div>
+
+    <div class="canvas-container">
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div class="face-count" id="faceCount"></div>
+
+    <div class="result-box" id="resultBox">
+      <h3>Face Descriptor (128 numbers)</h3>
+      <div class="descriptor-text" id="descriptorText"></div>
+      <div class="actions">
+        <button class="btn" onclick="copyDescriptor()">Copy JSON Array</button>
+        <button class="btn btn-secondary" onclick="copyForPostman()">Copy for Postman Body</button>
+        <button class="btn btn-secondary" onclick="saveToAPI()">Save to API</button>
+      </div>
+    </div>
+
+    <div class="info">
+      <strong>How it works:</strong><br>
+      1. Upload a clear face photo or take a selfie<br>
+      2. face-api.js detects the face in browser (no server needed)<br>
+      3. Generates a 128-dimension face descriptor array<br>
+      4. Copy and use in Postman or save directly via API
+    </div>
+  </div>
+
+  <!-- face-api.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <script>
+    let currentDescriptor = null;
+    let modelsLoaded = false;
+    let stream = null;
+
+    // Load face-api models
+    async function loadModels() {
+      showStatus('Loading face detection models... (first time may take 30s)', 'loading');
+      const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
+      try {
+        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+        modelsLoaded = true;
+        showStatus('Models loaded! Upload a photo or use camera.', 'success');
+      } catch (err) {
+        // Try alternate CDN
+        try {
+          const ALT_URL = 'https://raw.githubusercontent.com/nicolo-ribaudo/face-api.js-models/main/';
+          await faceapi.nets.ssdMobilenetv1.loadFromUri(ALT_URL);
+          await faceapi.nets.faceLandmark68Net.loadFromUri(ALT_URL);
+          await faceapi.nets.faceRecognitionNet.loadFromUri(ALT_URL);
+          modelsLoaded = true;
+          showStatus('Models loaded! Upload a photo or use camera.', 'success');
+        } catch (err2) {
+          showStatus('Error loading models. Check internet connection and try refreshing.', 'error');
+          console.error(err2);
+        }
+      }
+    }
+
+    function showStatus(msg, type) {
+      const el = document.getElementById('status');
+      el.innerHTML = msg;
+      el.className = 'status ' + type;
+      el.style.display = 'block';
+    }
+
+    async function handleFile(file) {
+      if (!file) return;
+      if (!modelsLoaded) { showStatus('Models still loading, please wait...', 'loading'); return; }
+
+      const img = new Image();
+      img.onload = () => detectFace(img);
+      img.src = URL.createObjectURL(file);
+
+      // Show preview
+      const area = document.getElementById('uploadArea');
+      area.innerHTML = `<img src="${img.src}" /><p style="margin-top:10px; color:#888">Click to change photo</p>`;
+    }
+
+    async function detectFace(img) {
+      showStatus('Detecting face...', 'loading');
+
+      const canvas = document.getElementById('canvas');
+      canvas.width = Math.min(img.width, 600);
+      canvas.height = (img.height / img.width) * canvas.width;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      try {
+        const detections = await faceapi
+          .detectAllFaces(canvas)
+          .withFaceLandmarks()
+          .withFaceDescriptors();
+
+        if (detections.length === 0) {
+          showStatus('No face detected! Try a clearer photo with good lighting.', 'error');
+          document.getElementById('faceCount').textContent = '';
+          return;
+        }
+
+        // Draw face boxes
+        const displaySize = { width: canvas.width, height: canvas.height };
+        faceapi.matchDimensions(canvas, displaySize);
+
+        // Redraw image first
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // Draw detections
+        detections.forEach((det, i) => {
+          const box = det.detection.box;
+          ctx.strokeStyle = '#6C63FF';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(box.x, box.y, box.width, box.height);
+          ctx.fillStyle = '#6C63FF';
+          ctx.font = '14px Segoe UI';
+          ctx.fillText(`Face ${i + 1}`, box.x, box.y - 5);
+        });
+
+        document.getElementById('faceCount').textContent =
+          `${detections.length} face(s) detected`;
+
+        // Use first face descriptor
+        currentDescriptor = Array.from(detections[0].descriptor);
+
+        // Show result
+        const resultBox = document.getElementById('resultBox');
+        resultBox.style.display = 'block';
+        document.getElementById('descriptorText').textContent =
+          JSON.stringify(currentDescriptor.map(n => parseFloat(n.toFixed(6))), null, 2);
+
+        showStatus(`Face detected successfully! Descriptor ready (128 numbers).`, 'success');
+
+        // If multiple faces, show all descriptors info
+        if (detections.length > 1) {
+          showStatus(
+            `${detections.length} faces found. Using Face 1 descriptor. ` +
+            `All ${detections.length} face descriptors are available.`, 'success'
+          );
+        }
+      } catch (err) {
+        showStatus('Error detecting face: ' + err.message, 'error');
+        console.error(err);
+      }
+    }
+
+    function copyDescriptor() {
+      if (!currentDescriptor) return;
+      const text = JSON.stringify(currentDescriptor.map(n => parseFloat(n.toFixed(6))));
+      navigator.clipboard.writeText(text).then(() => {
+        showStatus('Descriptor array copied to clipboard!', 'success');
+      });
+    }
+
+    function copyForPostman() {
+      if (!currentDescriptor) return;
+      const body = JSON.stringify({
+        faceDescriptor: currentDescriptor.map(n => parseFloat(n.toFixed(6)))
+      }, null, 2);
+      navigator.clipboard.writeText(body).then(() => {
+        showStatus('Postman body copied! Paste in Body > raw > JSON', 'success');
+      });
+    }
+
+    async function saveToAPI() {
+      if (!currentDescriptor) return;
+      const token = prompt('Enter your JWT token (from login):');
+      if (!token) return;
+
+      showStatus('Saving to API...', 'loading');
+      try {
+        const resp = await fetch('/api/users/face-descriptor', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token,
+          },
+          body: JSON.stringify({
+            faceDescriptor: currentDescriptor.map(n => parseFloat(n.toFixed(6)))
+          }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+          showStatus('Face descriptor saved to your profile!', 'success');
+        } else {
+          showStatus('API Error: ' + data.message, 'error');
+        }
+      } catch (err) {
+        showStatus('Network error: ' + err.message, 'error');
+      }
+    }
+
+    async function toggleCamera() {
+      const video = document.getElementById('video');
+      const captureBtn = document.getElementById('captureBtn');
+      const cameraBtn = document.getElementById('cameraBtn');
+
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+        video.style.display = 'none';
+        captureBtn.style.display = 'none';
+        cameraBtn.textContent = 'Use Camera';
+        return;
+      }
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+        video.srcObject = stream;
+        video.style.display = 'inline-block';
+        captureBtn.style.display = 'inline-block';
+        cameraBtn.textContent = 'Stop Camera';
+      } catch (err) {
+        showStatus('Camera access denied.', 'error');
+      }
+    }
+
+    function captureFromCamera() {
+      const video = document.getElementById('video');
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = video.videoWidth;
+      tempCanvas.height = video.videoHeight;
+      tempCanvas.getContext('2d').drawImage(video, 0, 0);
+
+      // Stop camera
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+        video.style.display = 'none';
+        document.getElementById('captureBtn').style.display = 'none';
+        document.getElementById('cameraBtn').textContent = 'Use Camera';
+      }
+
+      const img = new Image();
+      img.onload = () => detectFace(img);
+      img.src = tempCanvas.toDataURL('image/jpeg');
+
+      const area = document.getElementById('uploadArea');
+      area.innerHTML = `<img src="${img.src}" /><p style="margin-top:10px; color:#888">Click to change photo</p>`;
+    }
+
+    // Start loading models on page load
+    loadModels();
+  </script>
+</body>
+</html>
