@@ -1,16 +1,13 @@
 const Photo = require('../models/Photo');
 const Event = require('../models/Event');
+const { detectFacesFromUrl } = require('./faceService');
 
-// Simple in-memory queue for processing (no Redis needed for free tier)
+// Simple in-memory queue for processing
 const processingQueue = new Map();
 
-// Since face detection now happens on the client side,
-// "processing" here just marks photos as ready for matching.
-// When client-side face detection is integrated, descriptors
-// will be sent via API and stored per photo.
 const processEventPhotos = async (eventId) => {
   if (processingQueue.has(eventId.toString())) {
-    return; // Already processing
+    return;
   }
 
   processingQueue.set(eventId.toString(), { status: 'processing', progress: 0 });
@@ -26,9 +23,11 @@ const processEventPhotos = async (eventId) => {
 
     for (const photo of unprocessedPhotos) {
       try {
-        // Mark photo as processed (face descriptors will be
-        // added when uploaded with client-side detection, or
-        // via a separate face-indexing endpoint)
+        // Detect faces from Cloudinary image URL
+        const faces = await detectFacesFromUrl(photo.imageUrl);
+
+        photo.faces = faces;
+        photo.facesCount = faces.length;
         photo.isProcessed = true;
         await photo.save();
 
@@ -44,11 +43,26 @@ const processEventPhotos = async (eventId) => {
           processed,
           total,
         });
+
+        console.log(`Processed photo ${processed}/${total} - ${faces.length} faces found`);
       } catch (err) {
         console.error(`Error processing photo ${photo._id}:`, err.message);
+        // Mark as processed even on error to avoid infinite retry
         photo.isProcessed = true;
+        photo.facesCount = 0;
         await photo.save();
         processed++;
+
+        await Event.findByIdAndUpdate(eventId, {
+          $inc: { processedPhotos: 1 },
+        });
+
+        processingQueue.set(eventId.toString(), {
+          status: 'processing',
+          progress: Math.round((processed / total) * 100),
+          processed,
+          total,
+        });
       }
     }
 

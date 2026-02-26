@@ -1,7 +1,7 @@
 const Event = require('../models/Event');
 const Photo = require('../models/Photo');
 const EventGuest = require('../models/EventGuest');
-const { matchFaces } = require('../services/faceService');
+const { matchFaces, extractSelfieDescriptor } = require('../services/faceService');
 const { success, error } = require('../utils/responseFormatter');
 const { FACE_MATCH_THRESHOLD } = require('../config/constants');
 
@@ -168,28 +168,23 @@ const getAllEventPhotos = async (req, res) => {
 
     if (!eventId) return error(res, 'Event ID is required.', 400);
 
-    // Check if guest has joined this event
-    const eventGuest = await EventGuest.findOne({ eventId, userId: req.userId });
-    if (!eventGuest) return error(res, 'You have not joined this event.', 403);
+    // Allow photographers (event owner) or guests who joined
+    const event = await Event.findById(eventId);
+    if (!event) return error(res, 'Event not found.', 404);
 
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit; 
+    const isOwner = event.photographerId.toString() === req.userId.toString();
+    if (!isOwner) {
+      const eventGuest = await EventGuest.findOne({ eventId, userId: req.userId });
+      if (!eventGuest) return error(res, 'You have not joined this event.', 403);
+    }
 
-    const [photos, total] = await Promise.all([
-      Photo.find({ eventId })
-        .select('imageUrl thumbnailUrl createdAt')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit),
-      Photo.countDocuments({ eventId }),
-    ]);
+    const photos = await Photo.find({ eventId })
+      .select('imageUrl thumbnailUrl createdAt')
+      .sort({ createdAt: -1 });
 
     return success(res, {
       photos,
-      total,
-      page,
-      totalPages: Math.ceil(total / limit),
+      total: photos.length,
     }, 'All event photos fetched');
   } catch (err) {
     return error(res, err.message);
@@ -222,4 +217,61 @@ const getJoinedEvents = async (req, res) => {
   }
 };
 
-module.exports = { joinEvent, matchFacesHandler, getMyPhotos, getAllEventPhotos, downloadPhoto, downloadAll, getJoinedEvents };
+// Scan selfie - detect face and match against event photos
+const scanFace = async (req, res) => {
+  try {
+    const { eventId } = req.body;
+
+    if (!eventId) {
+      return error(res, 'Event ID is required.', 400);
+    }
+
+    if (!req.file) {
+      return error(res, 'Selfie image is required.', 400);
+    }
+
+    // Extract face descriptor from uploaded selfie
+    const faceData = await extractSelfieDescriptor(req.file.buffer);
+    const faceDescriptor = faceData.descriptor;
+
+    // Get all processed photos for the event
+    const photos = await Photo.find({
+      eventId,
+      isProcessed: true,
+      facesCount: { $gt: 0 },
+    });
+
+    const matchedPhotos = [];
+
+    for (const photo of photos) {
+      if (matchFaces(faceDescriptor, photo.faces, FACE_MATCH_THRESHOLD)) {
+        matchedPhotos.push({
+          _id: photo._id,
+          thumbnailUrl: photo.thumbnailUrl,
+          imageUrl: photo.imageUrl,
+        });
+      }
+    }
+
+    // Save matches
+    await EventGuest.findOneAndUpdate(
+      { eventId, userId: req.userId },
+      {
+        matchedPhotoIds: matchedPhotos.map(p => p._id),
+        matchedCount: matchedPhotos.length,
+        lastScannedAt: new Date(),
+      },
+      { upsert: true }
+    );
+
+    return success(res, {
+      matchedCount: matchedPhotos.length,
+      photos: matchedPhotos,
+      faceDescriptor,
+    }, 'Face scan complete');
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+module.exports = { joinEvent, matchFacesHandler, scanFace, getMyPhotos, getAllEventPhotos, downloadPhoto, downloadAll, getJoinedEvents };

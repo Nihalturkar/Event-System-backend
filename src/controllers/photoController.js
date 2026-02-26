@@ -4,6 +4,74 @@ const { uploadImage, uploadThumbnail, deleteImage } = require('../services/cloud
 const { processEventPhotos, getProgress } = require('../services/queueService');
 const { success, error } = require('../utils/responseFormatter');
 
+// Return Cloudinary config for direct upload from mobile
+const getUploadConfig = async (req, res) => {
+  try {
+    return success(res, {
+      cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+      uploadPreset: 'photomatch_upload',
+    }, 'Upload config fetched');
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
+// Save photos that were uploaded directly to Cloudinary from mobile
+const saveDirectPhotos = async (req, res) => {
+  try {
+    const { id: eventId } = req.params;
+    const { photos: photoDataArray } = req.body;
+
+    const event = await Event.findOne({ _id: eventId, photographerId: req.userId });
+    if (!event) return error(res, 'Event not found.', 404);
+
+    if (!photoDataArray || !Array.isArray(photoDataArray) || photoDataArray.length === 0) {
+      return error(res, 'No photo data provided.', 400);
+    }
+
+    const saved = [];
+    for (const data of photoDataArray) {
+      const thumbnailUrl = data.secure_url.replace(
+        '/upload/',
+        '/upload/w_400,h_400,c_fill,q_auto/'
+      );
+
+      const photo = await Photo.create({
+        eventId,
+        imageUrl: data.secure_url,
+        thumbnailUrl,
+        publicId: data.public_id,
+        width: data.width,
+        height: data.height,
+        size: data.bytes || 0,
+      });
+
+      saved.push({
+        _id: photo._id,
+        thumbnailUrl: photo.thumbnailUrl,
+        isProcessed: false,
+      });
+    }
+
+    // Set first photo as cover image if event doesn't have one
+    const updateFields = { $inc: { totalPhotos: saved.length } };
+    if (!event.coverImage && photoDataArray.length > 0) {
+      updateFields.coverImage = photoDataArray[0].secure_url.replace(
+        '/upload/',
+        '/upload/w_800,h_400,c_fill,q_auto/'
+      );
+    }
+    await Event.findByIdAndUpdate(eventId, updateFields);
+
+    return success(res, {
+      uploaded: saved.length,
+      photos: saved,
+    }, 'Photos saved successfully');
+  } catch (err) {
+    return error(res, err.message);
+  }
+};
+
 const uploadPhotos = async (req, res) => {
   try {
     const { id: eventId } = req.params;
@@ -59,10 +127,18 @@ const uploadPhotos = async (req, res) => {
       });
     }
 
-    // Update total photos count
-    await Event.findByIdAndUpdate(eventId, {
-      $inc: { totalPhotos: uploaded.length },
-    });
+    // Update total photos count + set cover image if not set
+    const updateFields = { $inc: { totalPhotos: uploaded.length } };
+    if (!event.coverImage && uploaded.length > 0) {
+      const firstPhoto = await Photo.findById(uploaded[0]._id);
+      if (firstPhoto) {
+        updateFields.coverImage = firstPhoto.imageUrl.replace(
+          '/upload/',
+          '/upload/w_800,h_400,c_fill,q_auto/'
+        );
+      }
+    }
+    await Event.findByIdAndUpdate(eventId, updateFields);
 
     return success(res, {
       uploaded: uploaded.length,
@@ -198,4 +274,5 @@ const getProcessingProgress = async (req, res) => {
 module.exports = {
   uploadPhotos, getPhotos, getPhoto, deletePhoto,
   updatePhotoFaces, triggerProcessing, getProcessingProgress,
+  getUploadConfig, saveDirectPhotos,
 };

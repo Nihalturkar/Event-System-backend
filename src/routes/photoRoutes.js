@@ -2,10 +2,13 @@ const router = require('express').Router();
 const {
   uploadPhotos, getPhotos, getPhoto, deletePhoto,
   updatePhotoFaces, triggerProcessing, getProcessingProgress,
+  getUploadConfig, saveDirectPhotos,
 } = require('../controllers/photoController');
 const { auth, photographerOnly } = require('../middlewares/auth');
 const upload = require('../middlewares/upload');
 
+router.get('/upload-config', auth, photographerOnly, getUploadConfig);
+router.post('/:id/photos/direct', auth, photographerOnly, saveDirectPhotos);
 router.post('/:id/photos', auth, photographerOnly, upload.array('photos', 50), uploadPhotos);
 router.get('/:id/photos', auth, getPhotos);
 // Static routes BEFORE dynamic :photoId route
