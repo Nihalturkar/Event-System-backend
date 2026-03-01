@@ -32,6 +32,4 @@ const userSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-userSchema.index({ phone: 1 });
-
 module.exports = mongoose.model('User', userSchema);

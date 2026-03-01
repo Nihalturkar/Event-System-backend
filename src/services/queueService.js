@@ -2,6 +2,8 @@ const Photo = require('../models/Photo');
 const Event = require('../models/Event');
 const { detectFacesFromUrl } = require('./faceService');
 
+const isDev = process.env.NODE_ENV === 'development';
+
 // Simple in-memory queue for processing
 const processingQueue = new Map();
 
@@ -44,9 +46,9 @@ const processEventPhotos = async (eventId) => {
           total,
         });
 
-        console.log(`Processed photo ${processed}/${total} - ${faces.length} faces found`);
+        if (isDev) console.log(`Processed photo ${processed}/${total} - ${faces.length} faces found`);
       } catch (err) {
-        console.error(`Error processing photo ${photo._id}:`, err.message);
+        if (isDev) console.error(`Error processing photo ${photo._id}:`, err.message);
         // Mark as processed even on error to avoid infinite retry
         photo.isProcessed = true;
         photo.facesCount = 0;
@@ -78,7 +80,7 @@ const processEventPhotos = async (eventId) => {
       processingQueue.delete(eventId.toString());
     }, 5 * 60 * 1000);
   } catch (err) {
-    console.error('Processing queue error:', err.message);
+    if (isDev) console.error('Processing queue error:', err.message);
     processingQueue.set(eventId.toString(), {
       status: 'failed',
       error: err.message,

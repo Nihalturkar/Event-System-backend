@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 5000;
  
 const startServer = async () => {
   try {
-    // Connect to MongoDB
+    // Connect to MongoDB 
     await connectDB();
 
     // Pre-load face-api models

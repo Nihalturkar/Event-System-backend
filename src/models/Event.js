@@ -5,13 +5,13 @@ const eventSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,    
-  }, 
+  },  
   eventName: {
     type: String,
-    required: true,
+    required: true, 
     trim: true,
   },
-  eventCode: {
+  eventCode: { 
     type: String,
     unique: true,
     uppercase: true,
@@ -56,6 +56,5 @@ const eventSchema = new mongoose.Schema({
 });
 
 eventSchema.index({ photographerId: 1 });
-eventSchema.index({ eventCode: 1 });
 
 module.exports = mongoose.model('Event', eventSchema);

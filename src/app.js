@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const routes = require('./routes');
 const errorHandler = require('./middlewares/errorHandler');
@@ -10,7 +11,10 @@ const { RATE_LIMIT } = require('./config/constants');
 const path = require('path');
 const app = express();
 
-app.use("/", express.static(__dirname + "/uploads"));
+// Gzip compression - reduces response size by 60-80%
+app.use(compression());
+
+app.use("/uploads", express.static(path.join(__dirname, 'uploads')));
 
 // Serve static files (face-tool, etc.)
 app.use('/tools', express.static(path.join(__dirname, '..', 'public')));
@@ -38,8 +42,8 @@ app.use(rateLimit({
 }));
 
 // Body parsing
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Logging
 if (process.env.NODE_ENV === 'development') {

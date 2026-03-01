@@ -1,9 +1,11 @@
 const Event = require('../models/Event');
 const Photo = require('../models/Photo');
 const EventGuest = require('../models/EventGuest');
-const { matchFaces, extractSelfieDescriptor } = require('../services/faceService');
+const { matchFaces, extractSelfieDescriptor, calculateDistance } = require('../services/faceService');
 const { success, error } = require('../utils/responseFormatter');
 const { FACE_MATCH_THRESHOLD } = require('../config/constants');
+
+const isDev = process.env.NODE_ENV === 'development';
 
 const joinEvent = async (req, res) => {
   try {
@@ -13,7 +15,7 @@ const joinEvent = async (req, res) => {
       return error(res, 'Event code is required.', 400);
     }
 
-    const event = await Event.findOne({ eventCode: eventCode.toUpperCase(), isActive: true });
+    const event = await Event.findOne({ eventCode: eventCode.toUpperCase(), isActive: true }).lean();
     if (!event) return error(res, 'Event not found or inactive.', 404);
 
     // Check if already joined
@@ -55,17 +57,18 @@ const matchFacesHandler = async (req, res) => {
       return error(res, 'Event ID and valid face descriptor are required.', 400);
     }
 
-    // Get all processed photos for the event
+    // Use .lean() for faster reads - returns plain JS objects
     const photos = await Photo.find({
       eventId,
       isProcessed: true,
       facesCount: { $gt: 0 },
-    });
+    }).select('faces thumbnailUrl imageUrl').lean();
 
     const matchedPhotos = [];
 
     for (const photo of photos) {
-      if (matchFaces(faceDescriptor, photo.faces, FACE_MATCH_THRESHOLD)) {
+      const result = matchFaces(faceDescriptor, photo.faces, FACE_MATCH_THRESHOLD);
+      if (result.matched) {
         matchedPhotos.push({
           _id: photo._id,
           thumbnailUrl: photo.thumbnailUrl,
@@ -120,7 +123,7 @@ const downloadPhoto = async (req, res) => {
   try {
     const { photoId } = req.params;
 
-    const photo = await Photo.findById(photoId);
+    const photo = await Photo.findById(photoId).select('imageUrl eventId').lean();
     if (!photo) return error(res, 'Photo not found.', 404);
 
     // Track download
@@ -169,18 +172,19 @@ const getAllEventPhotos = async (req, res) => {
     if (!eventId) return error(res, 'Event ID is required.', 400);
 
     // Allow photographers (event owner) or guests who joined
-    const event = await Event.findById(eventId);
+    const event = await Event.findById(eventId).select('photographerId').lean();
     if (!event) return error(res, 'Event not found.', 404);
 
     const isOwner = event.photographerId.toString() === req.userId.toString();
     if (!isOwner) {
-      const eventGuest = await EventGuest.findOne({ eventId, userId: req.userId });
+      const eventGuest = await EventGuest.findOne({ eventId, userId: req.userId }).lean();
       if (!eventGuest) return error(res, 'You have not joined this event.', 403);
     }
 
     const photos = await Photo.find({ eventId })
       .select('imageUrl thumbnailUrl createdAt')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     return success(res, {
       photos,
@@ -230,21 +234,45 @@ const scanFace = async (req, res) => {
       return error(res, 'Selfie image is required.', 400);
     }
 
+    if (isDev) console.log(`[ScanFace] Starting for event ${eventId}, image size: ${req.file.size} bytes`);
+
     // Extract face descriptor from uploaded selfie
-    const faceData = await extractSelfieDescriptor(req.file.buffer);
+    let faceData;
+    try {
+      faceData = await extractSelfieDescriptor(req.file.buffer);
+    } catch (faceErr) {
+      if (isDev) console.error('[ScanFace] Face extraction failed:', faceErr.message);
+      return error(res, 'Could not detect a face in your selfie. Please ensure your face is clearly visible, well-lit, and facing the camera.', 400);
+    }
+
     const faceDescriptor = faceData.descriptor;
 
-    // Get all processed photos for the event
+    // Use .lean() + select only needed fields for faster reads
     const photos = await Photo.find({
       eventId,
       isProcessed: true,
       facesCount: { $gt: 0 },
-    });
+    }).select('faces thumbnailUrl imageUrl').lean();
+
+    if (isDev) console.log(`[ScanFace] Found ${photos.length} processed photos with faces`);
+
+    if (photos.length === 0) {
+      const unprocessedCount = await Photo.countDocuments({ eventId, isProcessed: false });
+      if (unprocessedCount > 0) {
+        return success(res, {
+          matchedCount: 0,
+          photos: [],
+          faceDescriptor,
+          message: `Photos are still being processed (${unprocessedCount} remaining). Please try again in a few minutes.`,
+        }, 'Photos still processing');
+      }
+    }
 
     const matchedPhotos = [];
 
     for (const photo of photos) {
-      if (matchFaces(faceDescriptor, photo.faces, FACE_MATCH_THRESHOLD)) {
+      const result = matchFaces(faceDescriptor, photo.faces, FACE_MATCH_THRESHOLD);
+      if (result.matched) {
         matchedPhotos.push({
           _id: photo._id,
           thumbnailUrl: photo.thumbnailUrl,
@@ -252,6 +280,8 @@ const scanFace = async (req, res) => {
         });
       }
     }
+
+    if (isDev) console.log(`[ScanFace] Matched ${matchedPhotos.length} out of ${photos.length} photos`);
 
     // Save matches
     await EventGuest.findOneAndUpdate(
@@ -270,6 +300,7 @@ const scanFace = async (req, res) => {
       faceDescriptor,
     }, 'Face scan complete');
   } catch (err) {
+    if (isDev) console.error('[ScanFace] Error:', err.message);
     return error(res, err.message);
   }
 };
