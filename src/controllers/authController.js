@@ -11,8 +11,15 @@ const sendOTPHandler = async (req, res) => {
       return error(res, 'Valid phone number is required.', 400);
     }
 
+    // Check if user already exists
+    const existingUser = await User.findOne({ phone }).select('name role').lean();
+
     const result = await sendOTP(phone);
-    const responseData = { expiresIn: result.expiresIn };
+    const responseData = {
+      expiresIn: result.expiresIn,
+      isNewUser: !existingUser,
+      userName: existingUser?.name || null,
+    };
     if (result.devOtp) responseData.devOtp = result.devOtp;
     return success(res, responseData, 'OTP sent successfully');
   } catch (err) {
