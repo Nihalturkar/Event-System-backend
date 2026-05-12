@@ -114,9 +114,14 @@ const detectFacesFromBuffer = async (imageBuffer, { minConfidence = 0.5, maxSize
   }
 };
 
-// Detect faces from a Cloudinary URL
+// Detect faces from a Cloudinary URL - use reduced size for faster download
 const detectFacesFromUrl = async (imageUrl) => {
-  const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+  // Request a smaller version from Cloudinary to reduce download time
+  const optimizedUrl = imageUrl.replace('/upload/', '/upload/w_1200,q_80/');
+  const response = await axios.get(optimizedUrl, {
+    responseType: 'arraybuffer',
+    timeout: 30000,
+  });
   const buffer = Buffer.from(response.data);
   return detectFacesFromBuffer(buffer);
 };
@@ -143,35 +148,47 @@ const extractSelfieDescriptor = async (imageBuffer) => {
   return faces[0];
 };
 
-// Compare face descriptors - optimized with typed arrays
+// Compare face descriptors - optimized with Float32Array for SIMD-like speed
 const matchFaces = (guestDescriptor, photoFaces, threshold = FACE_MATCH_THRESHOLD) => {
-  let bestDistance = Infinity;
+  const thresholdSq = threshold * threshold; // Compare squared distances to avoid sqrt
+  const guest = guestDescriptor instanceof Float32Array
+    ? guestDescriptor
+    : new Float32Array(guestDescriptor);
+  let bestDistanceSq = Infinity;
+
   for (const face of photoFaces) {
     if (!face.descriptor || face.descriptor.length !== 128) continue;
 
+    const desc = face.descriptor instanceof Float32Array
+      ? face.descriptor
+      : new Float32Array(face.descriptor);
+
     let sum = 0;
     for (let i = 0; i < 128; i++) {
-      const diff = guestDescriptor[i] - face.descriptor[i];
+      const diff = guest[i] - desc[i];
       sum += diff * diff;
+      // Early exit: if partial sum already exceeds threshold, skip rest
+      if (sum > thresholdSq) break;
     }
-    const distance = Math.sqrt(sum);
 
-    if (distance < bestDistance) bestDistance = distance;
+    if (sum < bestDistanceSq) bestDistanceSq = sum;
 
-    if (distance < threshold) {
-      return { matched: true, distance };
+    if (sum < thresholdSq) {
+      return { matched: true, distance: Math.sqrt(sum) };
     }
   }
-  return { matched: false, distance: bestDistance };
+  return { matched: false, distance: Math.sqrt(bestDistanceSq) };
 };
 
 const calculateDistance = (descriptor1, descriptor2) => {
   if (!descriptor1 || !descriptor2 || descriptor1.length !== descriptor2.length) {
     return Infinity;
   }
+  const d1 = descriptor1 instanceof Float32Array ? descriptor1 : new Float32Array(descriptor1);
+  const d2 = descriptor2 instanceof Float32Array ? descriptor2 : new Float32Array(descriptor2);
   let sum = 0;
-  for (let i = 0; i < descriptor1.length; i++) {
-    const diff = descriptor1[i] - descriptor2[i];
+  for (let i = 0; i < d1.length; i++) {
+    const diff = d1[i] - d2[i];
     sum += diff * diff;
   }
   return Math.sqrt(sum);

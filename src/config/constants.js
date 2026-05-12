@@ -8,7 +8,7 @@ module.exports = {
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '7d',
   RATE_LIMIT: {
     windowMs: 60 * 1000, // 1 minute
-    max: 100,
+    max: 300, // Increased from 100 - photo apps need more headroom
   },
   CLOUDINARY_FOLDERS: {
     PHOTOS: 'photomatch/photos',

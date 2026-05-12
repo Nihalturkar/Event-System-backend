@@ -15,6 +15,7 @@ const joinEvent = async (req, res) => {
       return error(res, 'Event code is required.', 400);
     }
 
+    // Uses compound index (eventCode, isActive)
     const event = await Event.findOne({ eventCode: eventCode.toUpperCase(), isActive: true }).lean();
     if (!event) return error(res, 'Event not found or inactive.', 404);
 
@@ -22,7 +23,7 @@ const joinEvent = async (req, res) => {
     let eventGuest = await EventGuest.findOne({
       eventId: event._id,
       userId: req.userId,
-    });
+    }).lean();
 
     if (!eventGuest) {
       eventGuest = await EventGuest.create({
@@ -104,7 +105,7 @@ const getMyPhotos = async (req, res) => {
     const eventGuest = await EventGuest.findOne({
       eventId,
       userId: req.userId,
-    }).populate('matchedPhotoIds', 'imageUrl thumbnailUrl');
+    }).populate('matchedPhotoIds', 'imageUrl thumbnailUrl').lean();
 
     if (!eventGuest || !eventGuest.matchedPhotoIds.length) {
       return success(res, { photos: [], matchedCount: 0 }, 'No matched photos');
@@ -126,11 +127,11 @@ const downloadPhoto = async (req, res) => {
     const photo = await Photo.findById(photoId).select('imageUrl eventId').lean();
     if (!photo) return error(res, 'Photo not found.', 404);
 
-    // Track download
-    await EventGuest.findOneAndUpdate(
+    // Track download - fire and forget, don't block response
+    EventGuest.findOneAndUpdate(
       { eventId: photo.eventId, userId: req.userId },
       { $addToSet: { downloadedPhotoIds: photoId } }
-    );
+    ).exec();
 
     return success(res, { imageUrl: photo.imageUrl }, 'Download URL fetched');
   } catch (err) {
@@ -145,7 +146,7 @@ const downloadAll = async (req, res) => {
     const eventGuest = await EventGuest.findOne({
       eventId,
       userId: req.userId,
-    }).populate('matchedPhotoIds', 'imageUrl');
+    }).populate('matchedPhotoIds', 'imageUrl').lean();
 
     if (!eventGuest) {
       return error(res, 'No matched photos found.', 404);
@@ -153,11 +154,11 @@ const downloadAll = async (req, res) => {
 
     const urls = eventGuest.matchedPhotoIds.map(p => p.imageUrl);
 
-    // Track all downloads
-    await EventGuest.findOneAndUpdate(
+    // Track all downloads - fire and forget
+    EventGuest.findOneAndUpdate(
       { eventId, userId: req.userId },
       { downloadedPhotoIds: eventGuest.matchedPhotoIds.map(p => p._id) }
-    );
+    ).exec();
 
     return success(res, { urls, count: urls.length }, 'Download URLs fetched');
   } catch (err) {
@@ -168,6 +169,9 @@ const downloadAll = async (req, res) => {
 const getAllEventPhotos = async (req, res) => {
   try {
     const { eventId } = req.query;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
 
     if (!eventId) return error(res, 'Event ID is required.', 400);
 
@@ -181,14 +185,21 @@ const getAllEventPhotos = async (req, res) => {
       if (!eventGuest) return error(res, 'You have not joined this event.', 403);
     }
 
-    const photos = await Photo.find({ eventId })
-      .select('imageUrl thumbnailUrl createdAt')
-      .sort({ createdAt: -1 })
-      .lean();
+    // Run both queries in parallel
+    const [photos, total] = await Promise.all([
+      Photo.find({ eventId })
+        .select('imageUrl thumbnailUrl createdAt')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Photo.countDocuments({ eventId }),
+    ]);
 
     return success(res, {
       photos,
-      total: photos.length,
+      total,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     }, 'All event photos fetched');
   } catch (err) {
     return error(res, err.message);
@@ -199,7 +210,8 @@ const getJoinedEvents = async (req, res) => {
   try {
     const guestEntries = await EventGuest.find({ userId: req.userId })
       .sort({ joinedAt: -1 })
-      .populate('eventId', 'eventName eventDate venue coverImage totalPhotos isActive');
+      .populate('eventId', 'eventName eventDate venue coverImage totalPhotos isActive')
+      .lean();
 
     const events = guestEntries
       .filter((entry) => entry.eventId)
@@ -236,27 +248,27 @@ const scanFace = async (req, res) => {
 
     if (isDev) console.log(`[ScanFace] Starting for event ${eventId}, image size: ${req.file.size} bytes`);
 
-    // Extract face descriptor from uploaded selfie
-    let faceData;
-    try {
-      faceData = await extractSelfieDescriptor(req.file.buffer);
-    } catch (faceErr) {
-      if (isDev) console.error('[ScanFace] Face extraction failed:', faceErr.message);
+    // Start face extraction and photo query in parallel
+    const [faceResult, photos] = await Promise.allSettled([
+      extractSelfieDescriptor(req.file.buffer),
+      Photo.find({
+        eventId,
+        isProcessed: true,
+        facesCount: { $gt: 0 },
+      }).select('faces thumbnailUrl imageUrl').lean(),
+    ]);
+
+    if (faceResult.status === 'rejected') {
+      if (isDev) console.error('[ScanFace] Face extraction failed:', faceResult.reason.message);
       return error(res, 'Could not detect a face in your selfie. Please ensure your face is clearly visible, well-lit, and facing the camera.', 400);
     }
 
-    const faceDescriptor = faceData.descriptor;
+    const faceDescriptor = faceResult.value.descriptor;
+    const eventPhotos = photos.status === 'fulfilled' ? photos.value : [];
 
-    // Use .lean() + select only needed fields for faster reads
-    const photos = await Photo.find({
-      eventId,
-      isProcessed: true,
-      facesCount: { $gt: 0 },
-    }).select('faces thumbnailUrl imageUrl').lean();
+    if (isDev) console.log(`[ScanFace] Found ${eventPhotos.length} processed photos with faces`);
 
-    if (isDev) console.log(`[ScanFace] Found ${photos.length} processed photos with faces`);
-
-    if (photos.length === 0) {
+    if (eventPhotos.length === 0) {
       const unprocessedCount = await Photo.countDocuments({ eventId, isProcessed: false });
       if (unprocessedCount > 0) {
         return success(res, {
@@ -270,7 +282,7 @@ const scanFace = async (req, res) => {
 
     const matchedPhotos = [];
 
-    for (const photo of photos) {
+    for (const photo of eventPhotos) {
       const result = matchFaces(faceDescriptor, photo.faces, FACE_MATCH_THRESHOLD);
       if (result.matched) {
         matchedPhotos.push({
@@ -281,7 +293,7 @@ const scanFace = async (req, res) => {
       }
     }
 
-    if (isDev) console.log(`[ScanFace] Matched ${matchedPhotos.length} out of ${photos.length} photos`);
+    if (isDev) console.log(`[ScanFace] Matched ${matchedPhotos.length} out of ${eventPhotos.length} photos`);
 
     // Save matches
     await EventGuest.findOneAndUpdate(

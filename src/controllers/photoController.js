@@ -22,36 +22,31 @@ const saveDirectPhotos = async (req, res) => {
     const { id: eventId } = req.params;
     const { photos: photoDataArray } = req.body;
 
-    const event = await Event.findOne({ _id: eventId, photographerId: req.userId });
+    const event = await Event.findOne({ _id: eventId, photographerId: req.userId }).lean();
     if (!event) return error(res, 'Event not found.', 404);
 
     if (!photoDataArray || !Array.isArray(photoDataArray) || photoDataArray.length === 0) {
       return error(res, 'No photo data provided.', 400);
     }
 
-    const saved = [];
-    for (const data of photoDataArray) {
-      const thumbnailUrl = data.secure_url.replace(
-        '/upload/',
-        '/upload/w_400,h_400,c_fill,q_auto/'
-      );
+    // Batch insert all photos at once instead of one-by-one
+    const photoDocs = photoDataArray.map(data => ({
+      eventId,
+      imageUrl: data.secure_url,
+      thumbnailUrl: data.secure_url.replace('/upload/', '/upload/w_400,h_400,c_fill,q_auto/'),
+      publicId: data.public_id,
+      width: data.width,
+      height: data.height,
+      size: data.bytes || 0,
+    }));
 
-      const photo = await Photo.create({
-        eventId,
-        imageUrl: data.secure_url,
-        thumbnailUrl,
-        publicId: data.public_id,
-        width: data.width,
-        height: data.height,
-        size: data.bytes || 0,
-      });
+    const savedPhotos = await Photo.insertMany(photoDocs, { ordered: false });
 
-      saved.push({
-        _id: photo._id,
-        thumbnailUrl: photo.thumbnailUrl,
-        isProcessed: false,
-      });
-    }
+    const saved = savedPhotos.map(photo => ({
+      _id: photo._id,
+      thumbnailUrl: photo.thumbnailUrl,
+      isProcessed: false,
+    }));
 
     // Set first photo as cover image if event doesn't have one
     const updateFields = { $inc: { totalPhotos: saved.length } };
@@ -86,15 +81,14 @@ const uploadPhotos = async (req, res) => {
     const uploaded = [];
     const failed = [];
 
-    // Upload all photos in parallel (batch of 5 at a time)
-    const BATCH_SIZE = 5;
+    // Upload in parallel batches of 10 (increased from 5)
+    const BATCH_SIZE = 10;
     for (let i = 0; i < req.files.length; i += BATCH_SIZE) {
       const batch = req.files.slice(i, i + BATCH_SIZE);
       const results = await Promise.allSettled(
         batch.map(async (file) => {
           const fullResult = await uploadImage(file.buffer);
 
-          // Generate thumbnail URL using Cloudinary URL transformation (no separate upload needed)
           const thumbnailUrl = fullResult.secure_url.replace(
             '/upload/',
             '/upload/w_400,h_400,c_fill,q_auto/'
@@ -112,6 +106,7 @@ const uploadPhotos = async (req, res) => {
 
           return {
             _id: photo._id,
+            imageUrl: fullResult.secure_url,
             thumbnailUrl: photo.thumbnailUrl,
             isProcessed: false,
           };
@@ -127,16 +122,13 @@ const uploadPhotos = async (req, res) => {
       });
     }
 
-    // Update total photos count + set cover image if not set
+    // Update total photos count + set cover image - no extra DB query needed
     const updateFields = { $inc: { totalPhotos: uploaded.length } };
     if (!event.coverImage && uploaded.length > 0) {
-      const firstPhoto = await Photo.findById(uploaded[0]._id);
-      if (firstPhoto) {
-        updateFields.coverImage = firstPhoto.imageUrl.replace(
-          '/upload/',
-          '/upload/w_800,h_400,c_fill,q_auto/'
-        );
-      }
+      updateFields.coverImage = uploaded[0].imageUrl.replace(
+        '/upload/',
+        '/upload/w_800,h_400,c_fill,q_auto/'
+      );
     }
     await Event.findByIdAndUpdate(eventId, updateFields);
 
@@ -157,13 +149,16 @@ const getPhotos = async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
 
-    const photos = await Photo.find({ eventId })
-      .select('-faces')
-      .sort({ uploadedAt: -1 })
-      .skip(skip)
-      .limit(limit);
-
-    const total = await Photo.countDocuments({ eventId });
+    // Run both queries in parallel
+    const [photos, total] = await Promise.all([
+      Photo.find({ eventId })
+        .select('-faces')
+        .sort({ uploadedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Photo.countDocuments({ eventId }),
+    ]);
 
     return success(res, {
       photos,

@@ -32,4 +32,8 @@ const userSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+// Indexes for fast lookups
+userSchema.index({ phone: 1 }); // login/OTP verification
+userSchema.index({ role: 1 }); // role-based queries
+
 module.exports = mongoose.model('User', userSchema);

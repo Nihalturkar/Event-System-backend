@@ -55,6 +55,7 @@ const eventSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-eventSchema.index({ photographerId: 1 });
+eventSchema.index({ photographerId: 1, createdAt: -1 }); // photographer's events sorted
+eventSchema.index({ eventCode: 1, isActive: 1 }); // guest join event lookup
 
 module.exports = mongoose.model('Event', eventSchema);

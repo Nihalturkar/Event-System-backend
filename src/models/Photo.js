@@ -49,5 +49,7 @@ const photoSchema = new mongoose.Schema({
 
 photoSchema.index({ eventId: 1, isProcessed: 1, facesCount: 1 });
 photoSchema.index({ eventId: 1, createdAt: -1 });
+photoSchema.index({ publicId: 1 }); // fast delete by publicId
+photoSchema.index({ eventId: 1, uploadedAt: -1 }); // pagination sorted by upload time
 
 module.exports = mongoose.model('Photo', photoSchema);
