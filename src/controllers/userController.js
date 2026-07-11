@@ -31,8 +31,8 @@ const saveFaceDescriptor = async (req, res) => {
   try {
     const { faceDescriptor } = req.body;
 
-    if (!faceDescriptor || !Array.isArray(faceDescriptor) || faceDescriptor.length !== 128) {
-      return error(res, 'Valid face descriptor (128 numbers) is required.', 400);
+    if (!faceDescriptor || !Array.isArray(faceDescriptor) || (faceDescriptor.length !== 512 && faceDescriptor.length !== 128)) {
+      return error(res, 'Valid face descriptor is required.', 400);
     }
 
     await User.findByIdAndUpdate(req.userId, { faceDescriptor });

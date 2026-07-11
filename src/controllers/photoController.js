@@ -207,11 +207,11 @@ const updatePhotoFaces = async (req, res) => {
       return error(res, 'Faces array is required.', 400);
     }
 
-    // Validate face descriptors
+    // Validate face descriptors (512D ArcFace or legacy 128D)
     const validFaces = faces.filter(face =>
       face.descriptor &&
       Array.isArray(face.descriptor) &&
-      face.descriptor.length === 128
+      (face.descriptor.length === 512 || face.descriptor.length === 128)
     );
 
     const photo = await Photo.findById(photoId);

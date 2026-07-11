@@ -2,7 +2,13 @@ module.exports = {
   OTP_EXPIRY_MINUTES: 5,
   OTP_LENGTH: 6,
   EVENT_CODE_LENGTH: 8,
-  FACE_MATCH_THRESHOLD: parseFloat(process.env.FACE_MATCH_THRESHOLD) || 0.6,
+  // Cosine distance threshold for InsightFace w600k_r50 512D embeddings
+  // 0 = identical, 2 = completely different
+  // Same person: typically 0.3 - 0.65
+  // Different person: typically 0.75+
+  // 0.65 = good balance for event photography (group photos, varying angles)
+  FACE_MATCH_THRESHOLD: parseFloat(process.env.FACE_MATCH_THRESHOLD) || 0.65,
+  FACE_EMBEDDING_DIM: 512,
   MAX_UPLOAD_SIZE: 10 * 1024 * 1024, // 10MB
   ALLOWED_IMAGE_TYPES: ['image/jpeg', 'image/png', 'image/heic'],
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '7d',

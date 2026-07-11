@@ -1,123 +1,106 @@
 const path = require('path');
-
-// Use WASM backend for better accuracy and speed (no native compilation needed)
-const tf = require('@tensorflow/tfjs');
-require('@tensorflow/tfjs-backend-wasm');
-
-const faceapi = require('@vladmandic/face-api');
-const sharp = require('sharp');
+const { execFile } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const axios = require('axios');
 const { FACE_MATCH_THRESHOLD } = require('../config/constants');
 
 const isDev = process.env.NODE_ENV === 'development';
 
-let modelsLoaded = false;
-let modelsLoading = null;
+const EMBEDDING_DIM = 512;
+const PYTHON_SCRIPT = path.join(__dirname, 'face_processor.py');
 
-// Load face-api models
-const loadModels = async () => {
-  if (modelsLoaded) return;
-  if (modelsLoading) return modelsLoading;
+// ─── Python InsightFace Bridge ───
+// Uses InsightFace's buffalo_l model pack:
+//   - det_10g.onnx (RetinaFace detector - much better than face-api SSD)
+//   - w600k_r50.onnx (ArcFace recognition - 512D embeddings)
+//   - Built-in face alignment (Umeyama similarity transform)
+// This is the same tech stack PagarGuru uses (KBY-AI), but free & open-source.
 
-  modelsLoading = (async () => {
-    try {
-      // Set WASM backend for better accuracy than pure JS
-      await tf.setBackend('wasm');
-      await tf.ready();
-      if (isDev) console.log('TensorFlow.js backend:', tf.getBackend());
-
-      const modelsPath = path.join(__dirname, '../../node_modules/@vladmandic/face-api/model');
-
-      await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelsPath);
-      await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath);
-      await faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath);
-
-      modelsLoaded = true;
-      if (isDev) console.log('Face-api models loaded successfully');
-    } catch (err) {
-      // Fallback to CPU (pure JS) if WASM fails
-      console.warn('WASM backend failed, falling back to CPU:', err.message);
-      try {
-        await tf.setBackend('cpu');
-        await tf.ready();
-
-        const modelsPath = path.join(__dirname, '../../node_modules/@vladmandic/face-api/model');
-        await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelsPath);
-        await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath);
-        await faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath);
-
-        modelsLoaded = true;
-        if (isDev) console.log('Face-api models loaded with CPU backend');
-      } catch (fallbackErr) {
-        modelsLoading = null;
-        throw fallbackErr;
+const runPython = (args, timeoutMs = 120000) => {
+  return new Promise((resolve, reject) => {
+    execFile('python3', [PYTHON_SCRIPT, ...args], {
+      timeout: timeoutMs,
+      maxBuffer: 50 * 1024 * 1024, // 50MB for large descriptor arrays
+    }, (err, stdout, stderr) => {
+      if (err) {
+        // Try 'python' if 'python3' not found
+        if (err.code === 'ENOENT') {
+          execFile('python', [PYTHON_SCRIPT, ...args], {
+            timeout: timeoutMs,
+            maxBuffer: 50 * 1024 * 1024,
+          }, (err2, stdout2) => {
+            if (err2) return reject(new Error('Python not found or script failed: ' + err2.message));
+            try {
+              resolve(JSON.parse(stdout2.trim()));
+            } catch (e) {
+              reject(new Error('Invalid Python output: ' + stdout2.slice(0, 200)));
+            }
+          });
+          return;
+        }
+        return reject(new Error('Face processing failed: ' + (err.message || stderr)));
       }
-    }
-  })();
+      try {
+        resolve(JSON.parse(stdout.trim()));
+      } catch (e) {
+        reject(new Error('Invalid Python output: ' + stdout.slice(0, 200)));
+      }
+    });
+  });
+};
 
-  return modelsLoading;
+// Write buffer to temp file, run python, clean up
+const processBuffer = async (imageBuffer, command) => {
+  const tmpFile = path.join(os.tmpdir(), `face_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
+  try {
+    fs.writeFileSync(tmpFile, imageBuffer);
+    const result = await runPython([command, tmpFile]);
+    if (result.error) {
+      throw new Error(result.error);
+    }
+    return result;
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+};
+
+// ─── Model Loading ───
+// InsightFace models are loaded lazily by Python on first call.
+// This function warms up the Python process so first request isn't slow.
+let modelsWarmed = false;
+
+const loadModels = async () => {
+  if (modelsWarmed) return;
+  try {
+    if (isDev) console.log('Warming up InsightFace Python engine...');
+    await runPython(['warmup'], 180000); // 3 min timeout for first load
+    modelsWarmed = true;
+    if (isDev) console.log('InsightFace engine ready (512D embeddings)');
+  } catch (err) {
+    console.error('InsightFace warmup failed:', err.message);
+    throw err;
+  }
 };
 
 const preloadModels = async () => {
   try {
-    if (isDev) console.log('Preloading face-api models...');
     await loadModels();
-    if (isDev) console.log('Face-api models preloaded successfully');
   } catch (err) {
-    console.error('Failed to preload face-api models:', err.message);
+    console.error('Failed to preload InsightFace:', err.message);
   }
 };
 
-// Convert image buffer to tensor - with EXIF rotation handling
-const imageToTensor = async (imageBuffer, maxSize = 800) => {
-  const { data, info } = await sharp(imageBuffer)
-    .rotate() // Auto-rotate based on EXIF orientation
-    .resize(maxSize, maxSize, { fit: 'inside', withoutEnlargement: true })
-    .removeAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const tensor = tf.tensor3d(
-    new Uint8Array(data),
-    [info.height, info.width, info.channels]
-  );
-
-  return tensor;
+// ─── Detect faces + extract embeddings from image buffer ───
+const detectFacesFromBuffer = async (imageBuffer) => {
+  const result = await processBuffer(imageBuffer, 'detect');
+  // result is an array of {faceId, descriptor, boundingBox}
+  return Array.isArray(result) ? result : [];
 };
 
-// Detect faces and extract descriptors
-const detectFacesFromBuffer = async (imageBuffer, { minConfidence = 0.5, maxSize = 800 } = {}) => {
-  if (!modelsLoaded) {
-    await loadModels();
-  }
-
-  const tensor = await imageToTensor(imageBuffer, maxSize);
-
-  try {
-    const detections = await faceapi
-      .detectAllFaces(tensor, new faceapi.SsdMobilenetv1Options({ minConfidence }))
-      .withFaceLandmarks()
-      .withFaceDescriptors();
-
-    return detections.map((d, i) => ({
-      faceId: `face_${i}`,
-      descriptor: Array.from(d.descriptor),
-      boundingBox: {
-        x: d.detection.box.x,
-        y: d.detection.box.y,
-        width: d.detection.box.width,
-        height: d.detection.box.height,
-      },
-    }));
-  } finally {
-    tensor.dispose();
-  }
-};
-
-// Detect faces from a Cloudinary URL - use reduced size for faster download
+// ─── Detect faces from Cloudinary URL ───
 const detectFacesFromUrl = async (imageUrl) => {
-  // Request a smaller version from Cloudinary to reduce download time
-  const optimizedUrl = imageUrl.replace('/upload/', '/upload/w_1200,q_80/');
+  const optimizedUrl = imageUrl.replace('/upload/', '/upload/w_1600,q_85/');
   const response = await axios.get(optimizedUrl, {
     responseType: 'arraybuffer',
     timeout: 30000,
@@ -126,58 +109,50 @@ const detectFacesFromUrl = async (imageUrl) => {
   return detectFacesFromBuffer(buffer);
 };
 
-// Extract face descriptor from selfie - uses SAME settings as photo processing
+// ─── Extract selfie descriptor ───
 const extractSelfieDescriptor = async (imageBuffer) => {
-  const faces = await detectFacesFromBuffer(imageBuffer, {
-    minConfidence: 0.3,
-    maxSize: 800,
-  });
-
-  if (faces.length === 0) {
-    throw new Error('No face detected. Please ensure your face is clearly visible, well-lit, and facing the camera.');
+  const result = await processBuffer(imageBuffer, 'selfie');
+  if (result.error) {
+    throw new Error(result.error);
   }
-
-  if (faces.length > 1) {
-    faces.sort((a, b) => {
-      const areaA = a.boundingBox.width * a.boundingBox.height;
-      const areaB = b.boundingBox.width * b.boundingBox.height;
-      return areaB - areaA;
-    });
-  }
-
-  return faces[0];
+  return result;
 };
 
-// Compare face descriptors - optimized with Float32Array for SIMD-like speed
+// ─── Face Matching (Cosine Similarity) ───
+// InsightFace embeddings are L2-normalized
+// Cosine similarity = dot product
+// Distance = 1 - similarity (0 = identical, 2 = opposite)
 const matchFaces = (guestDescriptor, photoFaces, threshold = FACE_MATCH_THRESHOLD) => {
-  const thresholdSq = threshold * threshold; // Compare squared distances to avoid sqrt
   const guest = guestDescriptor instanceof Float32Array
     ? guestDescriptor
     : new Float32Array(guestDescriptor);
-  let bestDistanceSq = Infinity;
+
+  let bestDistance = Infinity;
+  const dim = guest.length;
 
   for (const face of photoFaces) {
-    if (!face.descriptor || face.descriptor.length !== 128) continue;
+    if (!face.descriptor || face.descriptor.length !== dim) continue;
 
     const desc = face.descriptor instanceof Float32Array
       ? face.descriptor
       : new Float32Array(face.descriptor);
 
-    let sum = 0;
-    for (let i = 0; i < 128; i++) {
-      const diff = guest[i] - desc[i];
-      sum += diff * diff;
-      // Early exit: if partial sum already exceeds threshold, skip rest
-      if (sum > thresholdSq) break;
+    // Cosine similarity (dot product of L2-normalized vectors)
+    let similarity = 0;
+    for (let i = 0; i < dim; i++) {
+      similarity += guest[i] * desc[i];
     }
 
-    if (sum < bestDistanceSq) bestDistanceSq = sum;
+    const distance = 1 - similarity;
 
-    if (sum < thresholdSq) {
-      return { matched: true, distance: Math.sqrt(sum) };
+    if (distance < bestDistance) bestDistance = distance;
+
+    if (distance < threshold) {
+      return { matched: true, distance, similarity };
     }
   }
-  return { matched: false, distance: Math.sqrt(bestDistanceSq) };
+
+  return { matched: false, distance: bestDistance, similarity: 1 - bestDistance };
 };
 
 const calculateDistance = (descriptor1, descriptor2) => {
@@ -186,12 +161,12 @@ const calculateDistance = (descriptor1, descriptor2) => {
   }
   const d1 = descriptor1 instanceof Float32Array ? descriptor1 : new Float32Array(descriptor1);
   const d2 = descriptor2 instanceof Float32Array ? descriptor2 : new Float32Array(descriptor2);
-  let sum = 0;
+
+  let similarity = 0;
   for (let i = 0; i < d1.length; i++) {
-    const diff = d1[i] - d2[i];
-    sum += diff * diff;
+    similarity += d1[i] * d2[i];
   }
-  return Math.sqrt(sum);
+  return 1 - similarity;
 };
 
 module.exports = {
@@ -202,4 +177,5 @@ module.exports = {
   extractSelfieDescriptor,
   matchFaces,
   calculateDistance,
+  EMBEDDING_DIM,
 };

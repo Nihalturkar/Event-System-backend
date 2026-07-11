@@ -1,7 +1,7 @@
 const Event = require('../models/Event');
 const Photo = require('../models/Photo');
 const EventGuest = require('../models/EventGuest');
-const { matchFaces, extractSelfieDescriptor, calculateDistance } = require('../services/faceService');
+const { matchFaces, extractSelfieDescriptor, calculateDistance, EMBEDDING_DIM } = require('../services/faceService');
 const { success, error } = require('../utils/responseFormatter');
 const { FACE_MATCH_THRESHOLD } = require('../config/constants');
 
@@ -54,7 +54,7 @@ const matchFacesHandler = async (req, res) => {
   try {
     const { eventId, faceDescriptor } = req.body;
 
-    if (!eventId || !faceDescriptor || faceDescriptor.length !== 128) {
+    if (!eventId || !faceDescriptor || faceDescriptor.length !== EMBEDDING_DIM) {
       return error(res, 'Event ID and valid face descriptor are required.', 400);
     }
 
